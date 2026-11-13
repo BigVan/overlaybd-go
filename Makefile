@@ -1,7 +1,10 @@
-.PHONY: build test check integration
+.PHONY: build windows test check integration
 
 build:
 	CGO_ENABLED=0 go build -o bin/overlaybd-go ./cmd/overlaybd-go
+
+windows:
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o bin/overlaybd-go-windows-amd64.exe ./cmd/overlaybd-go
 
 test:
 	go test ./...

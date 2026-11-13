@@ -1,4 +1,4 @@
-//go:build linux && (amd64 || arm64)
+//go:build (linux || windows) && (amd64 || arm64)
 
 package main
 
@@ -16,16 +16,17 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/bigvan/overlaybd-go/iscsi"
 	"github.com/bigvan/overlaybd-go/lsmt"
-	"github.com/bigvan/overlaybd-go/ublk"
 	"github.com/bigvan/overlaybd-go/zfile"
 )
 
-const usage = `overlaybd-go: local LSMT/ZFile storage over Linux ublk
+const usage = `overlaybd-go: local LSMT/ZFile storage over ublk or iSCSI
 
 Commands:
   create   --data FILE --index FILE --size 1GiB [--hybrid]
   serve    [--lower LAYER ...] [--data FILE --index FILE] [--id N] [--queue-depth 32] [--io-engine 0|3|4]
+  iscsi    [--lower LAYER ...] [--data FILE --index FILE] [--listen 127.0.0.1:3260] [--target IQN]
   delete   --id N
   commit   --data FILE --index FILE --output LAYER [--io-engine 0|3|4]
   read     [--lower LAYER ...] [--data FILE --index FILE] --offset 0 --length 4KiB [--output FILE] [--io-engine 0|3|4]
@@ -34,7 +35,8 @@ Commands:
   zfile decompress --input FILE --output FILE
   zfile verify     --input FILE
 
-serve creates /dev/ublkbN and runs in the foreground until SIGINT/SIGTERM.
+serve creates /dev/ublkbN on Linux. iscsi exports LUN 0 on loopback on Windows/Linux.
+Both run in the foreground until interrupted. Windows supports only --io-engine 0.
 Lower layers are ordered bottom to top; ZFile wrappers are detected automatically.
 Writable data ioEngine: 0=psync buffered (default), 3=io_uring buffered, 4=io_uring direct.
 New output files are never overwritten. Sizes accept B, KiB, MiB, GiB, TiB.
@@ -119,7 +121,7 @@ func run(args []string) (err error) {
 		}
 		defer func() { err = errors.Join(err, layer.Close()) }()
 		return layer.Commit(*out)
-	case "serve", "read", "write":
+	case "serve", "iscsi", "read", "write":
 		return imageCommand(args)
 	case "delete":
 		f := flags("delete")
@@ -127,7 +129,7 @@ func run(args []string) (err error) {
 		if err = parse(f, args[1:]); err != nil {
 			return err
 		}
-		return ublk.Delete(*id)
+		return deleteDevice(*id)
 	case "zfile":
 		return zfileCommand(args[1:])
 	default:
@@ -194,10 +196,14 @@ func imageCommand(args []string) (err error) {
 	var lowers paths
 	f.Var(&lowers, "lower", "sealed lower layer, repeat in bottom-to-top order")
 	var id, depth int
+	var listen, target string
 	var off, length, input, output string
 	if command == "serve" {
 		f.IntVar(&id, "id", -1, "device ID; -1 allocates automatically")
 		f.IntVar(&depth, "queue-depth", 32, "queue depth 1..128")
+	} else if command == "iscsi" {
+		f.StringVar(&listen, "listen", "127.0.0.1:3260", "loopback TCP address")
+		f.StringVar(&target, "target", "iqn.2026-11.io.overlaybd:disk", "iSCSI target IQN")
 	} else {
 		f.StringVar(&off, "offset", "0", "byte offset")
 		if command == "read" {
@@ -212,7 +218,7 @@ func imageCommand(args []string) (err error) {
 	}
 	// Parse requests before opening writable files (which can recover a partial tail).
 	var offset, count int64
-	if command != "serve" {
+	if command != "serve" && command != "iscsi" {
 		offset, err = parseSize(off)
 		if err != nil {
 			return err
@@ -234,18 +240,21 @@ func imageCommand(args []string) (err error) {
 		return err
 	}
 	defer func() { err = errors.Join(err, image.Close()) }()
-	if command == "serve" {
+	if command == "serve" || command == "iscsi" {
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
 		var outputErr error
-		// Buffered io_uring reads stay on the queue thread for cache hits;
-		// direct I/O also avoids a worker handoff for an idle queue's sole request.
-		err = ublk.Serve(ctx, image, ublk.Options{ID: id, QueueDepth: depth, Concurrent: *engine == 3 || *engine == 4, InlineReads: *engine == 3, InlineSingle: *engine != 0}, func(info ublk.Info) {
+		ready := func(info any) {
 			outputErr = json.NewEncoder(os.Stdout).Encode(info)
 			if outputErr != nil {
 				cancel()
 			}
-		})
+		}
+		if command == "iscsi" {
+			err = iscsi.Serve(ctx, image, iscsi.Options{Listen: listen, TargetName: target}, func(info iscsi.Info) { ready(info) })
+		} else {
+			err = serveDevice(ctx, image, id, depth, *engine, ready)
+		}
 		return errors.Join(err, outputErr)
 	}
 	if offset > image.Size() {

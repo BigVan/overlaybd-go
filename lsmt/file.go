@@ -8,9 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/bigvan/overlaybd-go/internal/fileio"
 	"github.com/bigvan/overlaybd-go/zfile"
-	"golang.org/x/sys/unix"
 )
 
 // IOEngine selects the writable data file backend. Index files always use
@@ -124,9 +122,9 @@ func create(dataPath, indexPath string, size int64, hybrid bool) (*File, error) 
 }
 
 func lockFiles(files ...dataFile) error {
-	for _, f := range files {
-		if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-			return fmt.Errorf("lsmt: lock %s: %w", f.Name(), err)
+	for _, file := range files {
+		if err := lockFile(file.Fd()); err != nil {
+			return fmt.Errorf("lsmt: lock %s: %w", file.Name(), err)
 		}
 	}
 	return nil
@@ -139,16 +137,7 @@ func OpenRW(dataPath, indexPath string) (*File, error) {
 // OpenRWWithOptions selects the data backend without changing the on-disk
 // format. Read-only lower layers and index logs retain their buffered backend.
 func OpenRWWithOptions(dataPath, indexPath string, options OpenOptions) (*File, error) {
-	var d dataFile
-	var err error
-	switch options.IOEngine {
-	case PSync:
-		d, err = os.OpenFile(dataPath, os.O_RDWR, 0)
-	case IOUringBuffered, IOUringDirect:
-		d, err = fileio.Open(dataPath, os.O_RDWR, options.IOEngine == IOUringDirect)
-	default:
-		return nil, fmt.Errorf("lsmt: unsupported ioEngine %d (use 0, 3 or 4)", options.IOEngine)
-	}
+	d, err := openDataFile(dataPath, options.IOEngine)
 	if err != nil {
 		return nil, err
 	}
