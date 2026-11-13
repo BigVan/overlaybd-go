@@ -1,0 +1,11 @@
+overlaybd-go
+
+This project implements the LSMT and ZFile binary formats defined by
+containerd/overlaybd (https://github.com/containerd/overlaybd), Copyright The
+Overlaybd Authors, licensed under the Apache License, Version 2.0.
+
+The Linux io_uring and ublk interfaces follow Linux UAPI definitions, provided
+under their respective Linux-syscall-note / MIT exceptions.
+
+Third-party Go module licenses are retained by their original authors; see
+go.mod and the corresponding module distributions.
